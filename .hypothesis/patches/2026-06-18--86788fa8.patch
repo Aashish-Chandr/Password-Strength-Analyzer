@@ -1,0 +1,16 @@
+From HEAD Mon Sep 17 00:00:00 2001
+From: Hypothesis 6.151.10 <no-reply@hypothesis.works>
+Date: Thu, 18 Jun 2026 11:22:40
+Subject: [PATCH] Hypothesis: add explicit examples
+
+---
+--- ./tests\test_hasher.py
++++ ./tests\test_hasher.py
+@@ -24,6 +24,7 @@
+ 
+ @given(st.text(min_size=1, max_size=128))
+ @settings(max_examples=100, deadline=None)
++@example(password="0000ࠀࠀࠀࠀࠀࠀࠀࠀࠀࠀࠀࠀࠀࠀࠀࠀࠀोोोोोो").via("discovered failure")
+ def test_hash_verify_round_trip_same_password(password: str) -> None:
+     """For any password p, Hasher.verify(p, Hasher.hash(p)) must return True.
+ 

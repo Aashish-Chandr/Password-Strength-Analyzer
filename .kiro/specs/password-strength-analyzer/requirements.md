@@ -59,12 +59,13 @@ The Password Strength Analyzer is a production-ready Python tool that evaluates 
 #### Acceptance Criteria
 
 1. THE Password_Store SHALL persist previously accepted passwords as hashed digests, never as plain text.
-2. THE Hasher SHALL use bcrypt or hashlib (SHA-256 minimum) to produce the stored digest.
-3. WHEN a candidate password is submitted for reuse checking, THE Password_Store SHALL compare the candidate's hash against all stored digests and return a boolean result.
-4. WHEN the candidate password matches any stored digest, THE Analyzer SHALL report the password as previously used and refuse to accept it.
-5. WHEN a new password is accepted (not previously used and strength is Strong or Very Strong), THE Password_Store SHALL store its hashed digest.
-6. THE Password_Store SHALL support both a SQLite file-backed mode and an in-memory mode selectable at initialization, defaulting to in-memory for testing environments.
-7. FOR ALL candidate passwords, hashing the same password twice with the same parameters SHALL produce a digest that verifies successfully against the original stored digest (round-trip property).
+2. THE Hasher SHALL use bcrypt with a cost factor of at least 10 to produce stored digests.
+3. WHEN a candidate password is submitted for reuse checking, THE Password_Store SHALL use bcrypt verification semantics to compare the candidate against each stored digest and return a boolean indicating whether a match was found.
+4. WHEN the candidate password matches any stored digest, THE Password_Store SHALL return a result explicitly indicating the password was previously used, and THE Analyzer SHALL refuse to accept it.
+5. THE Password_Store SHALL maintain a history of at most 10 stored digests per user context; WHEN a new digest must be added and the store already holds 10 entries, THE Password_Store SHALL evict the oldest digest (LRU order) before inserting the new one.
+6. WHEN a new password is accepted (not previously used and strength is Strong or Very Strong), THE Password_Store SHALL store its hashed digest, subject to the cap in criterion 5.
+7. THE Password_Store SHALL accept an explicit parameter at initialization to select SQLite file-backed mode or in-memory mode, defaulting to in-memory mode when no parameter is provided.
+8. WHEN the Password_Store is unavailable (e.g., SQLite connection failure), THE Analyzer SHALL return an error result without accepting or rejecting the candidate password.
 
 ---
 
@@ -74,13 +75,13 @@ The Password Strength Analyzer is a production-ready Python tool that evaluates 
 
 #### Acceptance Criteria
 
-1. THE Analyzer SHALL include inline code comments on every non-trivial function explaining its purpose, inputs, outputs, and any security considerations.
-2. THE Password_Store SHALL include inline code comments explaining why plain-text storage is avoided and how the chosen hash function operates.
-3. WHEN the script is executed directly (i.e., `__name__ == "__main__"`), THE system SHALL print a structured educational breakdown covering:
-   a. How the password complexity scoring logic works, step by step.
-   b. Why hashing is preferred over plain-text storage for passwords.
-   c. How the chosen cryptographic hash function (bcrypt or SHA-256) works at a conceptual level.
-4. THE educational breakdown SHALL be formatted in clearly separated sections with headings so it is readable in a terminal.
+1. THE Analyzer SHALL include inline code comments on every function that has a non-obvious purpose, side effect, or security implication (i.e., any function beyond a simple getter or setter), explaining its purpose, inputs, outputs, and any security considerations.
+2. THE Password_Store SHALL include inline code comments on every storage and retrieval function explaining why plain-text storage is avoided and how bcrypt operates on that code path.
+3. WHEN the script is executed directly (i.e., `__name__ == "__main__"`), THE system SHALL print a structured educational breakdown that includes:
+   a. A "Complexity Scoring" section explaining the 4-category complexity check, the length penalty, and the Weak_Password_List override — with at least 2 sentences each.
+   b. A "Why Hashing" section explaining at least two concrete risks of plain-text password storage and how hashing mitigates them — with at least 2 sentences.
+   c. A "How bcrypt Works" section covering salting, the cost factor, and the one-way property — with at least 2 sentences each sub-topic.
+4. THE educational breakdown SHALL be formatted with a visible heading line (e.g., `===` or `---` underlines) before each named section so that sections are visually distinct in a terminal without ANSI colour support.
 
 ---
 
@@ -90,9 +91,9 @@ The Password Strength Analyzer is a production-ready Python tool that evaluates 
 
 #### Acceptance Criteria
 
-1. THE system SHALL organize the Analyzer, Generator, Password_Store, and Hasher into separate, independently importable Python classes or modules.
-2. THE system SHALL include a `main()` function that orchestrates a complete demonstration: accepting a sample password, evaluating it, checking for reuse, optionally generating alternatives, and printing results.
-3. WHEN `main()` is called, THE system SHALL determine password strength dynamically from the actual input and demonstrate the full evaluation flow.
-4. WHEN `main()` is called with a Strong password (whether previously seen or not), THE system SHALL store the hash and confirm acceptance.
-5. THE system SHALL be runnable as a single Python script with no external dependencies beyond the Python standard library and `bcrypt` (if chosen), installable via `pip`.
+1. THE system SHALL organize the Analyzer, Generator, Password_Store, and Hasher into separate Python classes or modules such that each can be imported without importing or executing the others.
+2. THE system SHALL include a `main()` function that orchestrates a complete demonstration, printing to stdout: the evaluated strength label, the reuse check status, any generated alternative passwords (when applicable), and a hash acceptance or rejection confirmation.
+3. WHEN `main()` is called, THE system SHALL perform these three steps in order: (1) assess password strength using the Analyzer, (2) check for reuse using the Password_Store, and (3) conditionally invoke the Generator if the strength tier is Weak or Moderate.
+4. WHEN `main()` is called with a Strong or Very Strong password that is not previously used, THE system SHALL store its hash and print a message to stdout indicating the password was accepted and stored.
+5. THE system SHALL be runnable as a single Python script with no external dependencies beyond the Python standard library and `bcrypt`, installable via `pip install bcrypt`.
 6. IF `bcrypt` is not installed, THEN THE system SHALL fall back to `hashlib.sha256` with a per-password salt and log a warning to stderr.
