@@ -24,6 +24,7 @@ import warnings
 import collections
 import dataclasses
 import re
+import secrets  # cryptographically secure random source for password generation
 
 # ---------------------------------------------------------------------------
 # Optional bcrypt import — falls back to hashlib.sha256 when unavailable.
@@ -694,3 +695,322 @@ class Analyzer:
             return "Strong"
         else:  # score == 6
             return "Very Strong"
+
+
+# ---------------------------------------------------------------------------
+# Password_Store — hashed password history for anti-reuse checking
+# ---------------------------------------------------------------------------
+
+class Password_Store:
+    """Persists hashed password history to prevent reuse.
+
+    Supports two storage backends, selected at construction time:
+
+    - **In-memory mode** (``db_path=None``): a ``collections.deque(maxlen=10)``
+      that automatically evicts the oldest entry when the cap is reached.
+      Data is lost when the process exits.
+
+    - **SQLite mode** (``db_path=":memory:"`` or a file path): an SQLite
+      connection that persists digests in the ``password_history`` table.
+      ``":memory:"`` keeps the data within the session; a file path persists
+      it across process restarts.
+
+    In both modes, passwords are **never** stored as plain text — only the
+    bcrypt (or sha256 fallback) digest produced by ``Hasher.hash()`` is
+    ever written to the store.  This means a breach of the store reveals
+    only hashed values, which are computationally infeasible to reverse.
+
+    Class constant
+    --------------
+    MAX_HISTORY : int
+        Maximum number of digests retained.  Matches the ``deque(maxlen=10)``
+        cap and the SQLite LRU-eviction threshold.
+    """
+
+    MAX_HISTORY: int = 10
+
+    def __init__(self, db_path: str | None = None) -> None:
+        """Initialise the Password_Store in in-memory or SQLite mode.
+
+        Parameters
+        ----------
+        db_path : str | None
+            - ``None`` (default): use a ``collections.deque`` — lightweight,
+              no I/O, suitable for short-lived sessions or testing.
+            - ``":memory:"``: open an SQLite in-memory database; data persists
+              for the lifetime of the connection object.
+            - Any other string: treated as a filesystem path; SQLite creates
+              or opens the file at that location.
+
+        Raises
+        ------
+        Password_StoreError
+            When ``db_path`` is not ``None`` and the SQLite connection or
+            table-creation step fails (e.g., permission denied, corrupt file).
+            Wraps the underlying ``sqlite3.OperationalError`` to give callers
+            a single exception type to handle.
+
+        Security note
+        -------------
+        Plain text is NEVER stored here.  ``self._hasher.hash()`` is called
+        in ``store()`` before any write, so only an opaque bcrypt (or sha256
+        fallback) digest ever reaches the backend.  Even if an attacker reads
+        the raw store, they cannot recover the original passwords without
+        reversing a one-way hash function — computationally infeasible with a
+        correctly tuned bcrypt cost factor.
+        """
+        # Delegate all hashing and verification operations to a Hasher
+        # instance.  Password_Store intentionally does NOT implement its own
+        # hashing logic — this separation of concerns means the hashing
+        # algorithm can be upgraded (e.g., to Argon2) without touching the
+        # storage layer.
+        self._hasher: Hasher = Hasher()
+
+        if db_path is None:
+            # ------------------------------------------------------------------
+            # In-memory mode — use a bounded deque.
+            #
+            # collections.deque(maxlen=10) automatically drops the leftmost
+            # (oldest) item when a new item is appended and the deque is full.
+            # This gives O(1) LRU eviction with zero extra code, and no
+            # external dependencies.
+            #
+            # _conn is set to None to signal "not using SQLite" in other methods.
+            # ------------------------------------------------------------------
+            self._history: collections.deque[bytes] = collections.deque(maxlen=self.MAX_HISTORY)
+            self._conn: sqlite3.Connection | None = None
+        else:
+            # ------------------------------------------------------------------
+            # SQLite mode — db_path is either ":memory:" or a file path.
+            #
+            # sqlite3.connect() is called inside a try/except so that any
+            # OperationalError (e.g., directory missing, no write permission,
+            # corrupt database file) is translated into a Password_StoreError
+            # with a descriptive message.  This keeps the exception surface
+            # uniform for callers — they only ever need to catch
+            # Password_StoreError, not sqlite3-specific exceptions.
+            # ------------------------------------------------------------------
+            try:
+                # check_same_thread=False is intentionally NOT set here; default
+                # (True) is safer for single-threaded usage.  Multi-threaded
+                # callers should manage their own connection pooling.
+                self._conn = sqlite3.connect(db_path)
+
+                # Create the password_history table if it does not already exist.
+                # The digest column is BLOB (raw bytes) — never TEXT — to avoid
+                # any accidental encoding that could corrupt binary hash data.
+                # created_at records when the digest was inserted, which supports
+                # LRU ordering via the auto-increment primary key (MIN(id) = oldest).
+                self._conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS password_history (
+                        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                        digest     BLOB    NOT NULL,
+                        created_at TEXT    NOT NULL DEFAULT (datetime('now'))
+                    );
+                    """
+                )
+                self._conn.commit()
+
+                # _history is unused in SQLite mode; set to None for safety so
+                # that any accidental deque access in other methods raises
+                # AttributeError rather than silently operating on stale data.
+                self._history = None  # type: ignore[assignment]
+
+            except sqlite3.OperationalError as exc:
+                # Re-raise as Password_StoreError so callers have a single,
+                # stable exception type to handle.  Include the original error
+                # message to aid debugging without exposing internal SQLite
+                # implementation details in stack traces.
+                raise Password_StoreError(
+                    f"Failed to initialise Password_Store backend at {db_path!r}: {exc}"
+                ) from exc
+
+    def check_reuse(self, password: str) -> bool:
+        """Check whether *password* matches any stored digest.
+
+        Iterates all stored bcrypt (or fallback sha256) digests and calls
+        ``self._hasher.verify(password, digest)`` for each one.  Returns
+        ``True`` on the first match so we stop as soon as we find a hit —
+        there is no need to scan the rest of the history.  Returns ``False``
+        if the password does not match any stored digest.
+
+        bcrypt verification semantics
+        -----------------------------
+        ``Hasher.verify()`` calls ``bcrypt.checkpw(candidate, stored_digest)``.
+        bcrypt extracts the embedded salt from *stored_digest* (the salt is
+        baked into the bcrypt output string), re-hashes the candidate with
+        that same salt, and then compares the two outputs in constant time.
+        This means: (a) each stored digest carries its own unique salt, so
+        identical passwords stored at different times produce different digests,
+        and (b) we cannot compare digests directly — we MUST call verify() for
+        every comparison; a raw equality check would almost always return False
+        even for matching passwords because the salts differ.
+
+        Parameters
+        ----------
+        password : str
+            The plain-text candidate password to check against stored history.
+
+        Returns
+        -------
+        bool
+            ``True`` — the password was found in the history (previously used).
+            ``False`` — the password was not found (not previously used).
+
+        Raises
+        ------
+        Password_StoreError
+            On any backend failure (SQLite query error).  In-memory (deque)
+            mode does not perform I/O, so it cannot raise this exception.
+        """
+        if self._conn is None:
+            # ------------------------------------------------------------------
+            # In-memory (deque) mode
+            #
+            # Iterate the deque directly — it contains raw digest bytes in
+            # insertion order (oldest → newest).  We check every entry because
+            # bcrypt digests cannot be compared as plain bytes (each has a
+            # unique embedded salt), so verify() is the only correct comparison.
+            # ------------------------------------------------------------------
+            for digest in self._history:
+                if self._hasher.verify(password, digest):
+                    # Match found — password was previously used.
+                    return True
+            # No match after checking all stored digests.
+            return False
+        else:
+            # ------------------------------------------------------------------
+            # SQLite mode
+            #
+            # Fetch all stored digest blobs from the password_history table.
+            # We SELECT only the digest column — we never need the id or
+            # created_at for verification purposes.  Iterating the rows one at
+            # a time means we stop the Python loop on the first match; however,
+            # all rows are still fetched from SQLite into memory by fetchall().
+            # For a history cap of 10 this is negligible.
+            # ------------------------------------------------------------------
+            try:
+                cursor = self._conn.execute(
+                    "SELECT digest FROM password_history ORDER BY id ASC"
+                )
+                rows = cursor.fetchall()
+            except sqlite3.OperationalError as exc:
+                # Translate SQLite-specific errors into the stable
+                # Password_StoreError interface that callers expect.
+                raise Password_StoreError(
+                    f"check_reuse() query failed: {exc}"
+                ) from exc
+
+            for (digest,) in rows:
+                # digest is fetched as bytes (BLOB column) — pass directly to
+                # Hasher.verify() which handles both bcrypt and sha256 prefixes.
+                if self._hasher.verify(password, digest):
+                    return True
+            return False
+
+    def store(self, password: str) -> None:
+        """Hash *password* and add the digest to the history store.
+
+        Calls ``self._hasher.hash(password)`` to obtain a bcrypt (or fallback
+        sha256) digest — the plain-text password is NEVER written to the
+        backend.  If the store is already at capacity (``MAX_HISTORY``), the
+        oldest entry is evicted before the new digest is inserted (LRU policy).
+
+        LRU eviction strategy
+        ---------------------
+        *In-memory mode*: ``collections.deque(maxlen=10)`` handles eviction
+        automatically.  When ``deque.append()`` is called on a full deque,
+        Python drops the leftmost (oldest) element before adding the new one.
+        This is O(1) and requires no explicit eviction logic in this method.
+
+        *SQLite mode*: rows are ordered by the auto-increment ``id`` column —
+        a higher id means a more recent insertion, so the row with ``MIN(id)``
+        is always the oldest.  When the current count reaches ``MAX_HISTORY``,
+        we issue::
+
+            DELETE FROM password_history
+             WHERE id = (SELECT MIN(id) FROM password_history)
+
+        before the INSERT.  The subquery executes as a single atomic operation
+        inside the same transaction, ensuring the cap is never exceeded even
+        under concurrent access within the same connection.
+
+        Parameters
+        ----------
+        password : str
+            The plain-text password to hash and persist.  Never stored as-is.
+
+        Raises
+        ------
+        Password_StoreError
+            On any backend failure (SQLite query or commit error).
+        """
+        # Hash the password first — this is a pure CPU operation and does not
+        # touch the backend.  Doing it outside the try/except keeps the
+        # exception semantics clean: a Hasher error would propagate as-is,
+        # while only genuine backend errors become Password_StoreError.
+        digest: bytes = self._hasher.hash(password)
+
+        if self._conn is None:
+            # ------------------------------------------------------------------
+            # In-memory (deque) mode
+            #
+            # deque(maxlen=10) auto-evicts the oldest (leftmost) element when
+            # it is full and a new element is appended — no manual eviction
+            # needed.  This is the LRU strategy described in Requirement 3.5.
+            # No exception handling is needed here because deque.append()
+            # cannot fail under normal conditions.
+            # ------------------------------------------------------------------
+            self._history.append(digest)
+        else:
+            # ------------------------------------------------------------------
+            # SQLite mode
+            #
+            # Step 1: Count current entries.
+            # Step 2: If at cap, DELETE the oldest row (LRU eviction).
+            # Step 3: INSERT the new digest.
+            # Step 4: COMMIT so the changes are durable.
+            #
+            # All three DML statements execute within an implicit transaction;
+            # sqlite3's default isolation ensures they are atomic from the
+            # perspective of this connection.
+            # ------------------------------------------------------------------
+            try:
+                # Count how many digests are currently stored.
+                cursor = self._conn.execute(
+                    "SELECT COUNT(*) FROM password_history"
+                )
+                (count,) = cursor.fetchone()
+
+                if count >= self.MAX_HISTORY:
+                    # LRU eviction: remove the row with the smallest id value,
+                    # which corresponds to the oldest insertion.
+                    # The subquery SELECT MIN(id) identifies the target row;
+                    # the outer DELETE removes exactly that one row, keeping the
+                    # cap invariant: after this DELETE the table has count-1
+                    # rows, and the subsequent INSERT brings it back to count.
+                    self._conn.execute(
+                        "DELETE FROM password_history "
+                        "WHERE id = (SELECT MIN(id) FROM password_history)"
+                    )
+
+                # Insert the new digest as a BLOB — never as TEXT — to avoid
+                # any character-encoding transformation that could corrupt the
+                # binary bcrypt or sha256 digest bytes.
+                self._conn.execute(
+                    "INSERT INTO password_history (digest) VALUES (?)",
+                    (digest,),
+                )
+                self._conn.commit()
+
+            except sqlite3.OperationalError as exc:
+                # Roll back any partial changes and raise Password_StoreError
+                # so callers have a single, stable exception type to handle.
+                try:
+                    self._conn.rollback()
+                except Exception:
+                    pass  # Ignore rollback errors — the original error is more important.
+                raise Password_StoreError(
+                    f"store() failed: {exc}"
+                ) from exc

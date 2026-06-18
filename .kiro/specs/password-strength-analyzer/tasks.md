@@ -57,46 +57,46 @@ Implement the Password Strength Analyzer as a single Python script (`password_st
     - Implement `_tier_from_score(score: int) -> str` mapping 0–1 → "Weak", 2–3 → "Moderate", 4–5 → "Strong", 6 → "Very Strong"
     - _Requirements: 1.8_
 
-  - [-] 3.4 Write property test for over-length input rejection (Property 1)
+  - [x] 3.4 Write property test for over-length input rejection (Property 1)
     - **Property 1: Over-length inputs are always rejected**
     - **Validates: Requirements 1.1**
     - File: `tests/test_analyzer.py`
     - Use `@given(st.text(min_size=129))` — assert `result.error` is non-empty and `result.score is None`
 
-  - [-] 3.5 Write property test for invalid-type and empty input rejection (Property 2)
+  - [x] 3.5 Write property test for invalid-type and empty input rejection (Property 2)
     - **Property 2: Invalid-type and empty inputs are always rejected**
     - **Validates: Requirements 1.2**
     - File: `tests/test_analyzer.py`
     - Use `@given(st.one_of(st.none(), st.integers(), st.floats(), st.lists(st.text())))` plus the empty string case — assert `result.error` is non-empty and `result.score is None`
 
-  - [-] 3.6 Write property test for complexity score equals category count (Property 3)
+  - [x] 3.6 Write property test for complexity score equals category count (Property 3)
     - **Property 3: Complexity score equals the count of satisfied categories**
     - **Validates: Requirements 1.4, 1.5**
     - File: `tests/test_analyzer.py`
     - Build passwords with a known subset of the four categories; assert `complexity_points == len(categories_present)`
 
-  - [-] 3.7 Write property test for final score formula (Property 4)
+  - [x] 3.7 Write property test for final score formula (Property 4)
     - **Property 4: Final score equals clamped(complexity − length_penalty)**
     - **Validates: Requirements 1.3, 1.7**
     - File: `tests/test_analyzer.py`
     - For valid passwords not in the weak list, compute expected score with the formula `max(0, min(6, complexity − (2 if len(p) < 8 else 0)))` and assert equality
 
-  - [-] 3.8 Write property test for weak-list passwords always score 0 (Property 5)
+  - [x] 3.8 Write property test for weak-list passwords always score 0 (Property 5)
     - **Property 5: Weak-list passwords always score 0**
     - **Validates: Requirements 1.6**
     - File: `tests/test_analyzer.py`
     - Use `@given(st.sampled_from(WEAK_PASSWORD_LIST))` with random case mutation; assert `score == 0` and `tier == "Weak"`
 
-  - [-] 3.9 Write unit tests for `Analyzer` tier mapping and example passwords
+  - [x] 3.9 Write unit tests for `Analyzer` tier mapping and example passwords
     - Assert score 0 → "Weak", 1 → "Weak", 2 → "Moderate", 3 → "Moderate", 4 → "Strong", 5 → "Strong", 6 → "Very Strong"
     - Assert `analyze("correct horse battery staple")` returns a "Strong" or "Very Strong" tier
     - _Requirements: 1.7, 1.8_
 
-- [~] 4. Checkpoint — Ensure all Analyzer and Hasher tests pass
+- [x] 4. Checkpoint — Ensure all Analyzer and Hasher tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
 - [ ] 5. Implement the `Password_Store` class
-  - [~] 5.1 Implement `Password_Store.__init__()` with in-memory and SQLite modes
+  - [x] 5.1 Implement `Password_Store.__init__()` with in-memory and SQLite modes
     - Accept `db_path: str | None = None`; when `None`, initialize a `collections.deque(maxlen=10)` for in-memory mode
     - When `db_path` is `":memory:"` or a file path, open a SQLite connection, create the `password_history` table if not exists, and store the connection
     - Catch `sqlite3.OperationalError` in `__init__`; raise `Password_StoreError` on failure
@@ -104,31 +104,31 @@ Implement the Password Strength Analyzer as a single Python script (`password_st
     - Add inline comments explaining why plain text is never stored
     - _Requirements: 3.1, 3.2, 3.7, 4.2_
 
-  - [~] 5.2 Implement `Password_Store.check_reuse()` and `Password_Store.store()`
+  - [x] 5.2 Implement `Password_Store.check_reuse()` and `Password_Store.store()`
     - `check_reuse(password)`: iterate stored digests and call `self._hasher.verify(password, digest)` for each; return `True` on first match, `False` if none match; wrap SQLite calls in try/except and raise `Password_StoreError` on failure
     - `store(password)`: call `self._hasher.hash(password)` to get a digest; in SQLite mode, check count and run the LRU DELETE before INSERT if at cap; in deque mode, append (deque auto-evicts); wrap in try/except and raise `Password_StoreError` on failure
     - Add inline comments on both methods explaining the bcrypt verification semantics and the LRU eviction strategy
     - _Requirements: 3.1, 3.3, 3.4, 3.5, 3.6, 4.2_
 
-  - [~] 5.3 Write property test for no plain text in store (Property 7)
+  - [-] 5.3 Write property test for no plain text in store (Property 7)
     - **Property 7: Stored passwords are never retrievable as plain text**
     - **Validates: Requirements 3.1**
     - File: `tests/test_store.py`
     - Use `@given(st.text(min_size=1, max_size=128))` — after `store(p)`, read raw deque entries or SQLite `digest` column values; assert none equal `p` or `p.encode()`
 
-  - [~] 5.4 Write property test for hash/verify round trip via store (Property 8 — store path)
+  - [-] 5.4 Write property test for hash/verify round trip via store (Property 8 — store path)
     - **Property 8: check_reuse returns True after store (store/check_reuse round trip)**
     - **Validates: Requirements 3.2, 3.3**
     - File: `tests/test_store.py`
     - For any password `p`, after `store(p)`, assert `check_reuse(p)` is `True` and `check_reuse(q)` for any distinct `q` is `False`
 
-  - [~] 5.5 Write property test for history cap and LRU eviction (Property 9)
+  - [-] 5.5 Write property test for history cap and LRU eviction (Property 9)
     - **Property 9: History cap is enforced with LRU eviction**
     - **Validates: Requirements 3.5**
     - File: `tests/test_store.py`
     - Use `@given(st.lists(st.text(min_size=1, max_size=64), min_size=11, max_size=30, unique=True))` — store all; assert total entries ≤ 10; assert first `len(seq) − 10` passwords are not recognized; assert last 10 are all recognized
 
-  - [~] 5.6 Write unit tests for `Password_Store` modes and error handling
+  - [-] 5.6 Write unit tests for `Password_Store` modes and error handling
     - Test `Password_Store()` (in-memory deque) and `Password_Store(":memory:")` (SQLite in-memory) instantiation
     - Mock SQLite to raise `OperationalError`; assert `Password_StoreError` is raised
     - _Requirements: 3.7, 3.8_
@@ -137,7 +137,7 @@ Implement the Password Strength Analyzer as a single Python script (`password_st
   - Ensure all tests pass, ask the user if questions arise.
 
 - [ ] 7. Implement the `Generator` class
-  - [~] 7.1 Implement `Generator._build_password()` and `Generator.generate_suggestions()`
+  - [-] 7.1 Implement `Generator._build_password()` and `Generator.generate_suggestions()`
     - Implement `_build_password(length: int = 20) -> str`: seed with one `secrets.choice` character from each of the four required category subsets (4 guaranteed chars), fill remaining slots from the full printable-ASCII alphabet via `secrets.choice`, shuffle using `secrets.SystemRandom().shuffle`, return as string
     - Implement `generate_suggestions(n: int = 3) -> list[str]`: call `_build_password()` for each slot, apply one-retry weak-list check via `_passes_weak_check()`, collect and return exactly `n` strings
     - Implement `_passes_weak_check(password: str) -> bool` — case-insensitive check against `WEAK_PASSWORD_LIST`
